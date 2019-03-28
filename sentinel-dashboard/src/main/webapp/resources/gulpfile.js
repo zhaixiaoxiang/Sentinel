@@ -108,7 +108,7 @@ gulp.task('clean', function () {
 });
 
 // 总任务
-gulp.task('build', ['clean', 'jshint', 'lib', 'js', 'css']);
+gulp.task('build', ['clean', /*'jshint', */'lib', 'js', 'css']);
 
 // 服务
 gulp.task('serve', ['build'], function () {
@@ -119,7 +119,7 @@ gulp.task('serve', ['build'], function () {
   });
   // 打开浏览器
   setTimeout(() => {
-    open('http://localhost:8080/index_dev.htm')
+    open('http://localhost:8082/index_dev.htm')
   }, 200);
   // 监听
   gulp.watch(app.srcPath + '**/*.js', ['js']);

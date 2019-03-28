@@ -15,22 +15,15 @@
  */
 package com.alibaba.csp.sentinel.dashboard.controller.v2;
 
-import java.util.Date;
-import java.util.List;
-
-import javax.servlet.http.HttpServletRequest;
-
 import com.alibaba.csp.sentinel.dashboard.auth.AuthService;
 import com.alibaba.csp.sentinel.dashboard.auth.AuthService.AuthUser;
 import com.alibaba.csp.sentinel.dashboard.auth.AuthService.PrivilegeType;
-import com.alibaba.csp.sentinel.util.StringUtil;
-
 import com.alibaba.csp.sentinel.dashboard.datasource.entity.rule.FlowRuleEntity;
-import com.alibaba.csp.sentinel.dashboard.repository.rule.InMemoryRuleRepositoryAdapter;
+import com.alibaba.csp.sentinel.dashboard.domain.Result;
 import com.alibaba.csp.sentinel.dashboard.rule.DynamicRuleProvider;
 import com.alibaba.csp.sentinel.dashboard.rule.DynamicRulePublisher;
-import com.alibaba.csp.sentinel.dashboard.domain.Result;
-
+import com.alibaba.csp.sentinel.util.StringUtil;
+import com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,6 +38,11 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import javax.servlet.http.HttpServletRequest;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.List;
+
 /**
  * Flow rule controller (v2).
  *
@@ -57,14 +55,14 @@ public class FlowControllerV2 {
 
     private final Logger logger = LoggerFactory.getLogger(FlowControllerV2.class);
 
-    @Autowired
-    private InMemoryRuleRepositoryAdapter<FlowRuleEntity> repository;
+//    @Autowired
+//    private InMemoryRuleRepositoryAdapter<FlowRuleEntity> repository;
 
     @Autowired
-    @Qualifier("flowRuleDefaultProvider")
+    @Qualifier("flowRuleZookeeperProvider")
     private DynamicRuleProvider<List<FlowRuleEntity>> ruleProvider;
     @Autowired
-    @Qualifier("flowRuleDefaultPublisher")
+    @Qualifier("flowRuleZookeeperPublisher")
     private DynamicRulePublisher<List<FlowRuleEntity>> rulePublisher;
 
     @Autowired
@@ -88,7 +86,6 @@ public class FlowControllerV2 {
                     }
                 }
             }
-            rules = repository.saveAll(rules);
             return Result.ofSuccess(rules);
         } catch (Throwable throwable) {
             logger.error("Error when querying flow rules", throwable);
@@ -102,12 +99,18 @@ public class FlowControllerV2 {
         }
         if (StringUtil.isBlank(entity.getApp())) {
             return Result.ofFail(-1, "app can't be null or empty");
+        } else {
+            entity.setApp(entity.getApp().trim());
         }
         if (StringUtil.isBlank(entity.getLimitApp())) {
             return Result.ofFail(-1, "limitApp can't be null or empty");
+        } else {
+            entity.setLimitApp(entity.getLimitApp().trim());
         }
         if (StringUtil.isBlank(entity.getResource())) {
             return Result.ofFail(-1, "resource can't be null or empty");
+        } else {
+            entity.setResource(entity.getResource().trim());
         }
         if (entity.getGrade() == null) {
             return Result.ofFail(-1, "grade can't be null");
@@ -149,15 +152,17 @@ public class FlowControllerV2 {
         if (checkResult != null) {
             return checkResult;
         }
-        entity.setId(null);
+        entity.setId(System.currentTimeMillis());
         Date date = new Date();
         entity.setGmtCreate(date);
         entity.setGmtModified(date);
-        entity.setLimitApp(entity.getLimitApp().trim());
-        entity.setResource(entity.getResource().trim());
         try {
-            entity = repository.save(entity);
-            publishRules(entity.getApp());
+            List<FlowRuleEntity> rules = ruleProvider.getRules(entity.getApp());
+            if (rules == null) {
+                rules = Lists.newArrayList();
+            }
+            rules.add(entity);
+            rulePublisher.publish(entity.getApp(), rules);
         } catch (Throwable throwable) {
             logger.error("Failed to add flow rule", throwable);
             return Result.ofThrowable(-1, throwable);
@@ -168,38 +173,44 @@ public class FlowControllerV2 {
     @PutMapping("/rule/{id}")
     public Result<FlowRuleEntity> apiUpdateFlowRule(HttpServletRequest request,
                                                     @PathVariable("id") Long id,
-                                                    @RequestBody FlowRuleEntity entity) {
-        AuthUser authUser = authService.getAuthUser(request);
+                                                    @RequestBody FlowRuleEntity entity) throws Exception {
         if (id == null || id <= 0) {
             return Result.ofFail(-1, "Invalid id");
         }
-        FlowRuleEntity oldEntity = repository.findById(id);
-        if (oldEntity == null) {
-            return Result.ofFail(-1, "id " + id + " does not exist");
-        }
-        if (entity == null) {
-            return Result.ofFail(-1, "invalid body");
-        }
-        authUser.authTarget(oldEntity.getApp(), PrivilegeType.WRITE_RULE);
 
-        entity.setApp(oldEntity.getApp());
-        entity.setIp(oldEntity.getIp());
-        entity.setPort(oldEntity.getPort());
         Result<FlowRuleEntity> checkResult = checkEntityInternal(entity);
         if (checkResult != null) {
             return checkResult;
         }
+        String app = entity.getApp();
 
-        entity.setId(id);
-        Date date = new Date();
-        entity.setGmtCreate(oldEntity.getGmtCreate());
-        entity.setGmtModified(date);
-        try {
-            entity = repository.save(entity);
-            if (entity == null) {
-                return Result.ofFail(-1, "save entity fail");
+        AuthUser authUser = authService.getAuthUser(request);
+        authUser.authTarget(app, PrivilegeType.WRITE_RULE);
+
+        List<FlowRuleEntity> rules = ruleProvider.getRules(app);
+        if (rules == null || rules.isEmpty()) {
+            return Result.ofFail(-1, "rules not exist");
+        }
+        boolean exist = false;
+        Date oldGmtCreate = null;
+        Iterator<FlowRuleEntity> iterator = rules.iterator();
+        while (iterator.hasNext()) {
+            FlowRuleEntity next = iterator.next();
+            if (id.equals(next.getId())) {
+                oldGmtCreate = next.getGmtCreate();
+                iterator.remove();
+                exist = true;
             }
-            publishRules(oldEntity.getApp());
+        }
+        if (!exist) {
+            return Result.ofFail(-1, "id" + id + " does not exist");
+        }
+        entity.setId(id);
+        entity.setGmtCreate(oldGmtCreate);
+        entity.setGmtModified(new Date());
+        rules.add(entity);
+        try {
+            rulePublisher.publish(app, rules);
         } catch (Throwable throwable) {
             logger.error("Failed to update flow rule", throwable);
             return Result.ofThrowable(-1, throwable);
@@ -207,28 +218,33 @@ public class FlowControllerV2 {
         return Result.ofSuccess(entity);
     }
 
-    @DeleteMapping("/rule/{id}")
-    public Result<Long> apiDeleteRule(HttpServletRequest request, @PathVariable("id") Long id) {
-        AuthUser authUser = authService.getAuthUser(request);
+    @DeleteMapping("/rule/{app}/{id}")
+    public Result<Long> apiDeleteRule(HttpServletRequest request, @PathVariable String app, @PathVariable("id") Long id) throws Exception {
+        if (StringUtil.isBlank(app)) {
+            return Result.ofFail(-1, "app can't be null or empty");
+        }
         if (id == null || id <= 0) {
             return Result.ofFail(-1, "Invalid id");
         }
-        FlowRuleEntity oldEntity = repository.findById(id);
-        if (oldEntity == null) {
-            return Result.ofSuccess(null);
-        }
-        authUser.authTarget(oldEntity.getApp(), PrivilegeType.DELETE_RULE);
-        try {
-            repository.delete(id);
-            publishRules(oldEntity.getApp());
-        } catch (Exception e) {
-            return Result.ofFail(-1, e.getMessage());
-        }
-        return Result.ofSuccess(id);
-    }
+        AuthUser authUser = authService.getAuthUser(request);
+        authUser.authTarget(app, PrivilegeType.WRITE_RULE);
 
-    private void publishRules(/*@NonNull*/ String app) throws Exception {
-        List<FlowRuleEntity> rules = repository.findAllByApp(app);
+        List<FlowRuleEntity> rules = ruleProvider.getRules(app);
+        if (rules == null || rules.isEmpty()) {
+            return Result.ofFail(-1, "rules not exist");
+        }
+        boolean exist = false;
+        Iterator<FlowRuleEntity> iterator = rules.iterator();
+        while (iterator.hasNext()) {
+            if (id.equals(iterator.next().getId())) {
+                iterator.remove();
+                exist = true;
+            }
+        }
+        if (!exist) {
+            return Result.ofFail(-1, "id" + id + " does not exist");
+        }
         rulePublisher.publish(app, rules);
+        return Result.ofSuccess(id);
     }
 }
